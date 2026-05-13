@@ -1,0 +1,62 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  versions: [v0, v1]
+  openapi_regen_on_admin_refresh: true
+  auth:
+    mode: none
+  tls:
+    cert_path: certs/server.crt
+    key_path: certs/server.key
+
+logging:
+  level: INFO
+  format: json
+
+registry:
+  history_ring_size: 1000
+  subscription_ring_size: 10000
+  rebrowse_interval_seconds: 300
+
+connections:
+  - name: ua-ref-server
+    endpoint: opc.tcp://localhost:62541/Quickstarts/ReferenceServer
+    channel:
+      mode: "None"
+      policy: "None"
+    user:
+      type: anonymous
+    namespace_allowlist: []
+    reconnect:
+      backoff_ms: [1000, 2000, 4000, 8000, 16000, 32000, 60000]
+
+    # Objects have rich Properties or no Attributes
+    browse_variable_properties: true
+
+    max_parents_per_batch: 1000
+    max_children_per_batch: 50000
+
+    default_publishing_interval_ms: 1000
+    default_sampling_interval_ms: 500
+    
+  - name: kepware
+    endpoint: opc.tcp://192.168.64.4:49320
+    channel:
+      mode: SignAndEncrypt
+      policy: Basic256Sha256
+      client_cert_path: certs/client.der
+      client_key_path: certs/client.pem
+    user:
+      type: anonymous
+    namespace_allowlist: []
+    reconnect:
+      backoff_ms: [1000, 2000, 4000, 8000, 16000, 32000, 60000]
+
+    # Objects have rich Attributes or no Properties
+    browse_variable_properties: false
+
+    max_parents_per_batch: 1000
+    max_children_per_batch: 50000
+
+    default_publishing_interval_ms: 1000
+    default_sampling_interval_ms: 500

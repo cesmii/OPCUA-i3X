@@ -1,0 +1,7 @@
+flowchart LR
+    PLC["OPC UA Server<br/>(PLC / DCS / Historian)"]
+    APP["opcua-to-i3X<br/>wrapper"]
+    EXP["i3X Explorer / any<br/>i3X v1.0 client"]
+
+    PLC <-- "OPC UA 1.04<br/>binary, MonitoredItems" --> APP
+    APP <-- "HTTP + SSE<br/>i3X v1.0 (JSON)" --> EXP

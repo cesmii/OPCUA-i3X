@@ -1,0 +1,191 @@
+[project]
+name = "i3xua"
+version = "0.1.0"
+description = "OPC UA 1.04 client -> i3X v1.0 server wrapper. Exposes an OPC UA address space as a CESMII i3X HTTP+SSE API with OPC UA Part 6 JSON-encoded values."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "The i3xua Authors" }]
+readme = "README.md"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "asyncua>=1.1.6",
+    "pydantic>=2.9",
+    "pyyaml>=6.0.2",
+    "structlog>=24.4",
+    "janus>=2.0",
+    "httpx>=0.28",
+    "httpx-sse>=0.4",
+    "anyio>=4.6",
+]
+
+[project.scripts]
+i3xua = "i3xua.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8.12,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-httpx>=0.35",
+    "pytest-cov>=6.0",
+    "coverage[toml]>=7.6",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pyright>=1.1.390",
+    "types-pyyaml>=6.0",
+    "import-linter>=2.11",
+    "pydeps>=3.0.2",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+    "vulture>=2.12",
+    "radon>=6.0",
+    "xenon>=0.9",
+    "interrogate>=1.7",
+    "schemathesis>=3.39",
+]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: hits the live OPC UA Reference Server at opc.tcp://mac:62541/Quickstarts/ReferenceServer",
+    "contract: exercises the i3X HTTP API with a FakeUpstreamDataSource",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:asyncua.*",
+    "ignore::DeprecationWarning:websockets.*",
+    "ignore::DeprecationWarning:uvicorn.*",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+files = ["src/i3xua"]
+
+[[tool.mypy.overrides]]
+module = ["asyncua.*", "janus.*"]
+ignore_missing_imports = true
+
+# ── import-linter ────────────────────────────────────────────────
+[tool.importlinter]
+root_packages = ["i3xua"]
+include_external_packages = true
+
+# Contract 1 — hexagonal layers (inner → outer)
+[[tool.importlinter.contracts]]
+name = "Hexagonal layers"
+type = "layers"
+layers = [
+    "i3xua.api",
+    "i3xua.core",
+    "i3xua.i3x | i3xua.ouajson",
+]
+ignore_imports = [
+    "i3xua.cli -> i3xua.adapters.asyncua.upstream",
+]
+
+# Contract 2 — api and adapters must never import each other
+[[tool.importlinter.contracts]]
+name = "API / Adapters independence"
+type = "independence"
+modules = [
+    "i3xua.api",
+    "i3xua.adapters",
+]
+
+# Contract 3 — only the asyncua adapter may touch the asyncua library
+[[tool.importlinter.contracts]]
+name = "asyncua containment"
+type = "forbidden"
+source_modules = [
+    "i3xua.core",
+    "i3xua.api",
+    "i3xua.i3x",
+    "i3xua.ouajson",
+]
+forbidden_modules = ["asyncua"]
+
+# ── pydeps ───────────────────────────────────────────────────────
+[tool.pydeps]
+max_bacon = 3
+cluster = true
+no_show = true
+exclude = ["tests", "__pycache__"]
+
+# ── coverage.py ──────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["src/i3xua"]
+branch = true
+omit = [
+    "src/i3xua/__init__.py",
+    "src/i3xua/cli.py",  # entry point, exercised by integration not unit
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+    "pragma: no cover",
+]
+show_missing = true
+skip_covered = false
+
+# ── interrogate ──────────────────────────────────────────────────
+# Threshold set at the current floor (37%) so the tool reports without
+# immediately blocking. Tighten as docstrings are added.
+[tool.interrogate]
+fail-under = 35
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = true
+ignore-private = true
+ignore-nested-functions = true
+ignore-property-decorators = true
+exclude = ["tests", "build", "dist", ".venv"]
+verbose = 1
+
+# ── pyright ──────────────────────────────────────────────────────
+[tool.pyright]
+include = ["src/i3xua"]
+exclude = ["tests", ".venv", "build", "dist"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingImports = "error"
+reportMissingTypeStubs = "warning"
+# asyncua and janus have no stubs; let pyright skip them.
+reportUnknownMemberType = "warning"
+reportUnknownVariableType = "warning"
+reportUnknownArgumentType = "warning"
+
+# ── vulture ──────────────────────────────────────────────────────
+[tool.vulture]
+paths = ["src/i3xua"]
+min_confidence = 80
+sort_by_size = true
+# Protocol method params + context-manager dunders are required by the
+# protocol/ABC and not "unused" in any meaningful sense. The empty-async-
+# generator `yield` after `return` is a Python idiom (without it, Python
+# treats the function as a coroutine instead of a generator).
+ignore_names = ["spec", "monitored_item_handles", "exc_type", "tb"]
+ignore_decorators = ["@app.*", "@router.*", "@pytest.*"]

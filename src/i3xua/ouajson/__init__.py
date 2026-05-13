@@ -1,0 +1,61 @@
+"""OPC UA Part 6 reversible JSON encoder; ``encode()`` dispatches on the types.py dataclasses."""
+
+from __future__ import annotations
+
+from i3xua.ouajson.encode import (
+    encode,
+    encode_byte_string,
+    encode_data_value,
+    encode_datetime,
+    encode_expanded_node_id,
+    encode_extension_object,
+    encode_guid,
+    encode_localized_text,
+    encode_node_id,
+    encode_qualified_name,
+    encode_status_code,
+    encode_variant,
+)
+from i3xua.ouajson.types import (
+    GOOD_STATUS,
+    DataValue,
+    ExpandedNodeId,
+    ExtensionObject,
+    LocalizedText,
+    NodeId,
+    NodeIdType,
+    QualifiedName,
+    StatusCode,
+    StructureDefinition,
+    StructureField,
+    Variant,
+    VariantType,
+)
+
+__all__ = [
+    "GOOD_STATUS",
+    "DataValue",
+    "ExpandedNodeId",
+    "ExtensionObject",
+    "LocalizedText",
+    "NodeId",
+    "NodeIdType",
+    "QualifiedName",
+    "StatusCode",
+    "StructureDefinition",
+    "StructureField",
+    "Variant",
+    "VariantType",
+    "encode",
+    "encode_byte_string",
+    "encode_data_value",
+    "encode_datetime",
+    "encode_expanded_node_id",
+    "encode_extension_object",
+    "encode_guid",
+    "encode_localized_text",
+    "encode_node_id",
+    "encode_qualified_name",
+    "encode_status_code",
+    "encode_variant",
+]

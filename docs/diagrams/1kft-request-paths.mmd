@@ -1,0 +1,39 @@
+sequenceDiagram
+    autonumber
+    participant C as i3X Client
+    participant R as api/routes
+    participant Reg as core.registry
+    participant Sub as core.subscriptions
+    participant Up as adapters.upstream
+    participant Th as asyncua thread loop
+    participant S as OPC UA Server
+
+    Note over C,S: Boot — browse + register
+    C->>R: GET /v1/objects
+    R->>Up: browse(connection)
+    Up->>Th: schedule browse
+    Th->>S: Browse / Read (TypeDefs, refs)
+    S-->>Th: BrowseResult
+    Th-->>Up: neutral BrowseResult
+    Up-->>Reg: populate (objects, types, ns)
+    Reg-->>R: i3X JSON (Part-6 stripped at mapping)
+    R-->>C: 200 objects[]
+
+    Note over C,S: Live values — auto-tier subscription (D-51)
+    C->>R: GET /v1/objects/{id}/value/stream (SSE)
+    R->>Sub: ensure subscription
+    Sub->>Up: add_monitored_items(handle, [nodeId],<br/>publishing_ms?, sampling_ms?)
+    Up->>Th: bucket by PublishingInterval,<br/>create asyncua.Subscription on demand
+    Th->>S: CreateMonitoredItems
+    S-->>Th: data change notifications
+    Th-->>Sub: ValueSample (VQT, neutral)
+    Sub-->>R: fan-out queue
+    R-->>C: SSE: {value, quality, sourceTimestamp}
+
+    Note over C,S: One-shot read fallback
+    C->>R: POST /v1/objects/value  (no sub)
+    R->>Up: read_values([nodeIds])
+    Up->>Th: Read service
+    Th->>S: Read
+    S-->>Th: DataValues
+    Th-->>R: ValueSample[] → i3X JSON

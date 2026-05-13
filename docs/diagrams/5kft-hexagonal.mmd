@@ -1,0 +1,46 @@
+flowchart TB
+    subgraph EXPLORER["i3X Explorer / any i3X v1.0 client"]
+        EXP["i3X Explorer<br/>(or any i3X v1.0 client)"]
+    end 
+    subgraph API["api/  — FastAPI surface"]
+        ROUTES["routes/<br/>namespaces · object_types ·<br/>objects · values ·<br/>subscriptions · history · admin"]
+        SSE["sse.py<br/>(stream fan-out)"]
+        VER["versions.py<br/>(v0, v1)"]
+    end
+
+    subgraph CORE["core/  — pure Python (neutral types)"]
+        REG["registry"]
+        SUBS["subscriptions"]
+        HIST["history"]
+        MAP["mapping"]
+        OUA["ouajson<br/>(Part-6 encode)"]
+    end
+
+    PORTS["ports.py<br/>UpstreamDataSource ·<br/>SubscriptionSink · BridgeClock"]
+
+    subgraph ADP["adapters/asyncua/  — only module that imports asyncua"]
+        RUN["runtime<br/>(dedicated thread loop)"]
+        CONN["connection +<br/>reconnect (D-49)"]
+        BR["browse (D-53)"]
+        SUB["subscribe<br/>(auto-tier D-51)"]
+        TM["typemap"]
+        UP["upstream (façade)"]
+    end
+
+    SERVER["OPC UA server"]
+
+    API --> CORE
+    CORE -. depends on .-> PORTS
+    ADP -. implements .-> PORTS
+    UP --> RUN
+    RUN --> CONN --> SERVER
+    RUN --> BR --> SERVER
+    RUN --> SUB --> SERVER
+    SUB -- "ValueSample" --> SUBS
+    SUBS --> SSE
+    REG --> HIST
+
+    classDef neutral fill:#eef,stroke:#447;
+    classDef adapter fill:#fee,stroke:#a44;
+    class CORE,API,PORTS neutral;
+    class ADP adapter;

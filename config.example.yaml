@@ -1,0 +1,150 @@
+# i3xua configuration example.
+
+server:
+  host: 127.0.0.1                       # local loopback as safe default, use 0.0.0.0 to listen across all external
+  port: 8080
+  versions: [v0, v1]                    # expose both i3X v0 and v1 APIs on the same port
+  openapi_regen_on_admin_refresh: true  # dynamic types only appear after manual regen
+  auth:
+    mode: none                          # none | basic | bearer
+
+    # One of these sections per auth mode, use with env-expanded secrets
+    # tokens:
+      # - "${I3XUA_TOKEN}"              # env-expanded at load time
+    # users:
+      #   - { username: "admin", password: "${I3XUA_ADMIN_PW}" }
+  
+    # Optional tls
+    # tls:
+    #   cert_path: /etc/i3xua/server.crt
+    #   key_path:  /etc/i3xua/server.key
+    #   key_password: ${I3XUA_KEY_PASSWORD}    # OPTIONAL
+
+logging:
+  level: INFO                           # or DEBUG
+  format: json                          # structlog JSON to stdout
+
+registry:
+  history_ring_size: 1000               # per-node history buffer
+  subscription_ring_size: 10000         # per-i3X-subscription buffer
+  rebrowse_interval_seconds: 300        # periodic address-space drift sweep
+
+# One or more OPC UA servers.
+connections:
+  - name: conn_ref
+    # The wrapper auto-discovers the server's ApplicationUri via
+    # `connect_and_get_server_endpoints` before CreateSession, so the
+    # endpoint URL stays in its natural form.
+    endpoint: opc.tcp://localhost:62541/Quickstarts/ReferenceServer
+    # OPC UA security has two layers:
+    #
+    #   channel: how the SecureChannel is protected (encryption + integrity)
+    #   user:    who's logging in (anonymous / username / x509 user token)
+    #
+    # `server_trust_list_dir` is OPTIONAL. When set, the UA server cert
+    # discovered via GetEndpoints is SHA-256-matched against the directory
+    # before the SecureChannel opens (refuse-on-no-match). When omitted,
+    # the wrapper AUTO-ACCEPTS the server certificate returned during
+    # discovery for that session, re-discovering and re-accepting on every
+    # reconnect — appropriate for trusted-network deployments without a
+    # managed PKI. Pin the directory for stricter environments.
+    #
+    # ----- Scenario 1: anonymous over a plaintext channel (dev/test only) -----
+    channel:
+      mode: "None"
+      policy: "None"
+    user:
+      type: anonymous
+
+    # ----- Scenario 2: anonymous over an encrypted channel -----
+    # channel:
+    #   mode: SignAndEncrypt              # Sign | SignAndEncrypt
+    #   policy: Basic256Sha256            # Basic256Sha256 | Aes128Sha256RsaOaep | Aes256Sha256RsaPss
+    #   client_cert_path: /certs/client.der
+    #   client_key_path:  /certs/client.pem
+    #   server_trust_list_dir: /certs/trusted_servers/   # SHA-256 match against discovered server cert
+    # user:
+    #   type: anonymous
+
+    # ----- Scenario 3: username over an encrypted channel (production-flavored) -----
+    # channel:
+    #   mode: SignAndEncrypt
+    #   policy: Aes256Sha256RsaPss
+    #   client_cert_path: /certs/client.der
+    #   client_key_path:  /certs/client.pem
+    #   server_trust_list_dir: /certs/trusted_servers/
+    # user:
+    #   type: username
+    #   username: opcuser
+    #   password: ${OPCUA_REF_PW}
+
+    # ----- Scenario 4: x509 user token over an encrypted channel -----
+    # channel:
+    #   mode: SignAndEncrypt
+    #   policy: Aes256Sha256RsaPss
+    #   client_cert_path: /certs/client.der
+    #   client_key_path:  /certs/client.pem
+    #   server_trust_list_dir: /certs/trusted_servers/
+    # user:
+    #   type: x509
+    #   cert_path: /certs/user.der                       # may be the same file as client_cert_path
+    #   key_path:  /certs/user.pem
+    
+    # Empty = expose every namespace in the server's NamespaceArray
+    namespace_allowlist: []             
+
+    # Per-connection backoff schedule (ms) applied to both initial-connect
+    # and connection-lost retry loops. Sequence is clamped at the last value
+    # for attempts beyond its length. Set single value to replicate simpler retry logic.
+    reconnect:
+      backoff_ms: [1000, 2000, 4000, 8000, 16000, 32000, 10000]
+
+    # STARTUP PERFORMANCE & SERVER BROWSING NOTE: The following setting can have tremendous performance implications for connections to
+    # UA servers with large address spaces (250,000 tags/objects or more).
+    # 
+    # OPC UA servers are allowed to expose object metadata - data type, read/write, engineering units - 
+    # in two places: As OPC UA object ATTRIBUTES fetched via the Read Service, and as OPC UA object PROPERTIES discovered 
+    # via the Browse Service. 
+    # 
+    # The OPC Foundation .NET Console Reference Server and other oftentimes bespoke UA servers exposes most metadata as 
+    # PROPERTIES, and UA servers that support simple canonical type interfaces like DDE alongside OPC UA may store most metadata as 
+    # ATTRIBUTES. However, these simple UA server address spaces may have dozens or even hundreds of parent nodes 
+    # each with tens of thousands of children parent nodes with tens and with the performance cost of PROPERTY browsing 
+    # each child, browsing for variable properties by default should be avoided, especially during startup sequences with 
+    # automated browsing.
+    browse_variable_properties: false  # As of 2026, most commercial UA servers store variable metadata as ATTRIBUTES
+
+    # STARTUP PERFORMANCE & SERVER BROWSING NOTE: Adaptive browse batching budgets.
+    #
+    # max_parents_per_batch is a hard cap on parents in one BrowseRequest.
+    # Server's OperationLimits.MaxNodesPerBrowse may clamp this further
+    # at connect time when the server publishes that field.
+    #
+    # max_children_per_batch is a soft target for total children returned
+    # across one batch. The walker tracks a running mean of
+    # children-per-parent and packs batches to approach this number.
+    # Lower if you see Failed-to-send under load; raise for servers with
+    # bigger MaxMessageSize budgets.
+    max_parents_per_batch: 1000
+    max_children_per_batch: 50000
+
+    # Auto-tier: subscriptions are NOT pre-declared in config. The wrapper
+    # creates one asyncua Subscription per distinct PublishingInterval on
+    # demand whenever an i3X client calls POST /subscriptions/register.
+    # Below are the FALLBACK intervals used when the register body omits them.
+    default_publishing_interval_ms: 1000
+    default_sampling_interval_ms: 500
+
+  # ------------------------------------------------------------------
+  # Adding more OPC UA servers
+  # ------------------------------------------------------------------
+  # Add another entry to the `connections:` list. Each connection has its 
+  # own set of configurable connection properties and automatically gets 
+  # its own daemon thread and asyncio loop. 
+  # 
+  # Connection names must be unique; the name becomes:
+  # 
+  # `<connection>!<NodeId>`
+  #
+  # a namespace URI that appears on two servers becomes two distinct i3X 
+  # namespaces via `<uri>#connection=<name>`, so clients never see collisions.
