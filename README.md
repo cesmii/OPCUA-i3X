@@ -1,4 +1,4 @@
-# i3xua
+# OPCUA-i3X
 
 An i3X HTTPS Wrapper for OPC UA Servers.
 
