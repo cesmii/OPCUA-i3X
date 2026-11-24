@@ -13,8 +13,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from i3xua import __version__
-from i3xua.api.deps import get_state, require_auth
+from i3xua.api.deps import get_state, get_version, require_auth
 from i3xua.api.state import AppState
+from i3xua.api.versions import ApiVersion, shape_single
 
 router = APIRouter()
 
@@ -97,19 +98,22 @@ async def _run_andon_subprocess(repo_root: Path) -> dict[str, Any]:
 
 
 @router.get("/info")
-async def info() -> dict[str, object]:
+async def info(version: Annotated[ApiVersion, Depends(get_version)]) -> object:
     """v1 version-detection endpoint probed by i3X-Explorer.
 
-    Returns the `ServerInfo` shape from the reference server: specVersion,
-    serverVersion, serverName, and capabilities (query/update/subscribe).
+    i3X 1.0 release: ``SuccessResponse[ServerInfo]`` (``{success, result}``),
+    matching api.i3x.dev/v1/info. v0 keeps the bare ``ServerInfo``.
     """
     from i3xua.i3x.types import ServerInfo
 
-    return ServerInfo(
-        specVersion="1.0",
-        serverVersion=__version__,
-        serverName="i3xua",
-    ).model_dump(by_alias=True)
+    return shape_single(
+        version,
+        ServerInfo(
+            specVersion="1.0",
+            serverVersion=__version__,
+            serverName="i3xua",
+        ).model_dump(by_alias=True),
+    )
 
 
 @router.get("/healthz")
