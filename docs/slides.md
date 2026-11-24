@@ -3,7 +3,7 @@ marp: true
 theme: default
 paginate: true
 header: "i3xua"
-footer: "github.com/dad-io/i3xua"
+footer: "github.com/cesmii/OPCUA-i3X"
 ---
 
 <!-- _class: lead -->
