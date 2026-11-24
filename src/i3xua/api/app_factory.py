@@ -17,6 +17,7 @@ from i3xua.api.routes import (
     namespaces,
     object_types,
     objects,
+    relationship_types,
     subscriptions,
     values,
 )
@@ -30,6 +31,7 @@ def _versioned_bundle() -> APIRouter:
     bundle = APIRouter()
     bundle.include_router(namespaces.router)
     bundle.include_router(object_types.router)
+    bundle.include_router(relationship_types.router)
     bundle.include_router(objects.router)
     bundle.include_router(values.router)
     bundle.include_router(subscriptions.router)
