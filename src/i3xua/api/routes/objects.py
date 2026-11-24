@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -97,19 +98,27 @@ async def list_objects(
     includeMetadata: Annotated[bool, Query()] = False,
 ) -> object:
     wanted_type = typeElementId or typeId
-    types_map = _types_by_source(state)
-    out: list[dict[str, Any]] = []
-    for node in _all_instances(state):
-        inst = _build_instance(node, state, types_map)
-        if wanted_type is not None and inst.typeElementId != wanted_type:
-            continue
-        if root and inst.parentId is not None:
-            continue
-        payload = _dump_instance(inst)
-        if not includeMetadata:
-            payload.pop("metadata", None)
-        out.append(payload)
-    return shape_single(version, out)
+
+    def _build() -> list[dict[str, Any]]:
+        types_map = _types_by_source(state)
+        out: list[dict[str, Any]] = []
+        for node in _all_instances(state):
+            # parentId is None exactly when parent_node_id is None; filter
+            # before building so ?root=true doesn't materialize every instance.
+            if root and node.parent_node_id is not None:
+                continue
+            inst = _build_instance(node, state, types_map)
+            if wanted_type is not None and inst.typeElementId != wanted_type:
+                continue
+            payload = _dump_instance(inst)
+            if not includeMetadata:
+                payload.pop("metadata", None)
+            out.append(payload)
+        return out
+
+    # Registries are immutable snapshots, so building off-loop is safe and
+    # keeps /info and friends responsive while a large listing is built.
+    return shape_single(version, await asyncio.to_thread(_build))
 
 
 @router.get("/objects/{element_id:path}")

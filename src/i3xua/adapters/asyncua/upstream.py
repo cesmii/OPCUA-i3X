@@ -48,6 +48,12 @@ from asyncua.common.subscription import DataChangeNotif
 # `load_data_type_definitions`; asyncua doesn't expose a direct NamespaceUri
 # per generated class, so we reuse the connection-scoped fallback until we
 # can map index -> URI at reconcile time.
+from i3xua.adapters.asyncua.batch_sizer import (
+    DEFAULT_READ_CHUNK_VALUE_IDS,
+    BatchSizer,
+    MetadataReadFeedback,
+    read_metadata_adaptive,
+)
 from i3xua.adapters.asyncua.browse import (
     HAS_COMPONENT_REFS,
     RELATIONSHIP_NAMES,
@@ -300,9 +306,18 @@ class _BrowseCounters:
     browse_next_other_bad: int = 0
     browse_next_starvation_logs_emitted: int = 0  # capped log counter
     browse_children_parent_bad_status: int = 0
+    metadata_read_calls: int = 0
+    metadata_read_splits: int = 0
+    metadata_read_rejections: int = 0
+    metadata_read_failures: int = 0  # Variables emitted without metadata
+    metadata_read_failure_logs_emitted: int = 0  # capped log counter
 
     def as_metrics(self) -> dict[str, int]:
         return {
+            "metadata_read_calls": self.metadata_read_calls,
+            "metadata_read_splits": self.metadata_read_splits,
+            "metadata_read_rejections": self.metadata_read_rejections,
+            "metadata_read_failures": self.metadata_read_failures,
             "browse_children_parent_bad_status": self.browse_children_parent_bad_status,
             "browse_initial_calls": self.browse_initial_calls,
             "browse_initial_starved": self.browse_initial_starved,
@@ -322,9 +337,16 @@ class _AsyncuaBrowseSource(BrowseSource):
     `None` from `get_node_info`/`get_type_info` so the walk keeps going.
     """
 
-    def __init__(self, client: UaClientLike) -> None:
+    def __init__(self, client: UaClientLike, max_nodes_per_read: int = 0) -> None:
         self._client: Any = client  # asyncua.Client at runtime
         self.counters: _BrowseCounters = _BrowseCounters()
+        # Metadata Reads are sized in Variables (7 ReadValueIds each). The
+        # ceiling honours the server's published MaxNodesPerRead; without it
+        # we fall back to a bounded default and let BadTooManyOperations
+        # rejections teach the sizer the real cap.
+        per_read = max_nodes_per_read if max_nodes_per_read > 0 else DEFAULT_READ_CHUNK_VALUE_IDS
+        self.max_vars_per_read: int = max(1, per_read // len(_METADATA_ATTRS))
+        self.sizer: BatchSizer = BatchSizer(ceiling=self.max_vars_per_read)
         # Captured during _pre_connect from the chosen EndpointDescription;
         # surfaced to the browse layer for the wrapper-cast namespace.
         self.application_uri: str | None = None
@@ -608,22 +630,15 @@ class _AsyncuaBrowseSource(BrowseSource):
                     variable_children.append(idx)
 
         if variable_children:
-            # Single multi-attribute Read instead of N single-attr reads.
-            # Seven attributes per Variable (DataType + six metadata fields).
-            # Bad statuses on individual attributes become None on the
-            # NodeInfo; a Read-call-level exception still degrades silently.
+            # Multi-attribute Read (7 attrs per Variable), split into
+            # sizer-driven chunks so no single Read exceeds the server's
+            # MaxNodesPerRead (declared or learned from BadTooManyOperations)
+            # or runs long enough to hit the request timeout. Port of
+            # project-barracuda opcua/client BatchSizer + readMetadataAdaptive.
             var_node_ids = [_ua_node_id(children[i].info.node_id) for i in variable_children]
             items = _build_metadata_read_items(var_node_ids)
-            try:
-                results = await self._client.uaclient.read(ua.ReadParameters(NodesToRead=items))
-            except Exception as exc:
-                logger.debug(
-                    "browse_children: metadata Read for %d Variable children failed: %s",
-                    len(var_node_ids),
-                    exc,
-                )
-                return children
-            metadata_by_node = _decode_metadata_results(items, results)
+            results = await self._read_metadata_chunked(items, len(var_node_ids))
+            metadata_by_node = _decode_metadata_results(items, results) if results else {}
             for idx, var_nid in zip(variable_children, var_node_ids, strict=True):
                 attrs = metadata_by_node.get(var_nid.to_string(), {})
                 old = children[idx]
@@ -642,6 +657,69 @@ class _AsyncuaBrowseSource(BrowseSource):
                 )
 
         return children
+
+    async def _read_metadata_chunked(self, items: list[Any], n_vars: int) -> list[Any]:
+        """Read ``items`` (``n_vars`` x 7 ReadValueIds) in adaptive chunks.
+
+        Returns one DataValue per item in request order; a chunk that fails
+        gets Bad placeholders so its Variables decode to ``None`` metadata
+        while the rest of the batch keeps theirs.
+        """
+        alignment = len(_METADATA_ATTRS)
+        failed = ua.DataValue(StatusCode_=ua.StatusCode(ua.StatusCodes.BadNoData))
+
+        async def _read(chunk: Any) -> list[Any]:
+            return list(
+                await self._client.uaclient.read(ua.ReadParameters(NodesToRead=list(chunk)))
+            )
+
+        out: list[Any] = []
+        off = 0
+        c = self.counters
+        while off < n_vars:
+            size = min(self.sizer.next(), self.max_vars_per_read)
+            end = min(off + size, n_vars)
+            chunk = items[off * alignment : end * alignment]
+            before = self.sizer.window
+            c.metadata_read_calls += 1
+            fb: MetadataReadFeedback | None
+            try:
+                dvs, fb = await read_metadata_adaptive(_read, chunk, alignment)
+                err: Exception | None = None
+            except Exception as exc:
+                dvs, fb, err = [], getattr(exc, "feedback", None), exc
+            if fb is not None:
+                for rejected in fb.rejected_sizes:
+                    self.sizer.on_rejection(rejected)
+                c.metadata_read_rejections += len(fb.rejected_sizes)
+                c.metadata_read_splits += fb.splits
+            if err is None and len(dvs) != len(chunk):
+                err = RuntimeError(
+                    f"metadata Read returned {len(dvs)} results for {len(chunk)} items"
+                )
+            if err is None:
+                if fb is not None:
+                    for units, elapsed in fb.accepted:
+                        self.sizer.on_success(units, elapsed)
+                out.extend(dvs)
+                off = end
+                continue
+            if isinstance(err, ua.uaerrors.BadTooManyOperations) and self.sizer.window < before:
+                continue  # shrank: retry the same offset at the smaller size
+            c.metadata_read_failures += end - off
+            if c.metadata_read_failure_logs_emitted < 10:
+                c.metadata_read_failure_logs_emitted += 1
+                logger.warning(
+                    "metadata Read failed for %d Variables (offset %d of %d); "
+                    "they are emitted without DataType/AccessLevel metadata: %r",
+                    end - off,
+                    off,
+                    n_vars,
+                    err,
+                )
+            out.extend([failed] * len(chunk))
+            off = end
+        return out
 
     async def get_type_info(self, node_id: str) -> TypeInfo | None:
         """Return a `TypeInfo` with REAL InstanceDeclarations.
@@ -1165,19 +1243,38 @@ class _ConnectionBinding:
             )
         return chosen
 
+    async def _discover_max_nodes_per_read(self, client: UaClientLike) -> int:
+        """Read ``Server.ServerCapabilities.OperationLimits.MaxNodesPerRead``
+        (i=11490, UInt32). Returns 0 when missing, zero or unreadable; the
+        metadata Read then falls back to a bounded default and learns the
+        real cap from ``BadTooManyOperations``."""
+        try:
+            value = await client.get_node(ua.NodeId(11490, 0)).read_value()  # type: ignore[attr-defined]
+            limit = int(value) if value is not None else 0
+        except Exception as exc:
+            logger.debug("could not read MaxNodesPerRead on %s: %s", self.cfg.name, exc)
+            limit = 0
+        logger.info(
+            "read limits for %s: MaxNodesPerRead=%s",
+            self.cfg.name,
+            limit if limit > 0 else "unpublished",
+        )
+        return max(limit, 0)
+
     async def _on_connected(self, client: UaClientLike) -> None:
         logger.info("opcua connected: %s", self.cfg.name)
         # Read the server's published browse limits BEFORE we start walking.
         # Picking too high a batch size triggers ``BadNoContinuationPoints``
         # on tag-heavy servers and silently drops high-fan-out folders.
         max_parents = await self._discover_max_parents_per_batch(client)
+        max_nodes_per_read = await self._discover_max_nodes_per_read(client)
         # Run a browse, then ship the results to the main loop's registries.
         # Phase timings (seconds) are recorded to surface startup performance
         # via /admin/state — useful when comparing a Reference Server (~7k
         # nodes) against a real PLC/OPC server (varies wildly).
         started_at = datetime.now(UTC)
         t_total = time.monotonic()
-        source = _AsyncuaBrowseSource(client)
+        source = _AsyncuaBrowseSource(client, max_nodes_per_read=max_nodes_per_read)
         source.application_uri = self._application_uri
         source.application_name = self._application_name
         cfg = BrowseConfig(
@@ -1296,7 +1393,9 @@ class _ConnectionBinding:
             "browse complete: %s — %d ns / %d types / %d instances "
             "in %.2fs (browse %.2fs, types %.2fs, snapshot %.2fs); "
             "browse_next_starved=%d (out of %d calls), "
-            "browse_initial_starved=%d (recovered=%d, unrecoverable=%d)",
+            "browse_initial_starved=%d (recovered=%d, unrecoverable=%d); "
+            "metadata_read calls=%d splits=%d rejections=%d failures=%d "
+            "(sizer window=%d hard_cap=%d ceiling=%d)",
             self.cfg.name,
             metrics["namespaces"],
             metrics["types"],
@@ -1310,6 +1409,13 @@ class _ConnectionBinding:
             metrics["browse_initial_starved"],
             metrics["browse_initial_starved_recovered"],
             metrics["browse_initial_starved_unrecoverable"],
+            metrics["metadata_read_calls"],
+            metrics["metadata_read_splits"],
+            metrics["metadata_read_rejections"],
+            metrics["metadata_read_failures"],
+            source.sizer.window,
+            source.sizer.hard_cap,
+            source.sizer.ceiling,
         )
 
         # restore i3X-requested subscriptions now that the registries
@@ -1460,9 +1566,7 @@ class _ConnectionBinding:
         sample = sample_from_ouajson_data_value(
             connection=self.cfg.name, node_id=wire_nid, data_value=data_value
         )
-        logger.debug(
-            "deliver_sample: element_id=%s quality=%s", sample.element_id, sample.quality
-        )
+        logger.debug("deliver_sample: element_id=%s quality=%s", sample.element_id, sample.quality)
         try:
             await self._ship_to_main(self.registries.fan_out(sample))
         except Exception as exc:

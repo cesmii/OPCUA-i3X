@@ -20,9 +20,11 @@ from i3xua.core.neutral import NodeClass, NodeDescriptor, Quality, ValueSample
 
 @pytest.mark.contract
 async def test_info_returns_server_info_shape(http_client: httpx.AsyncClient) -> None:
-    """GET /info → ServerInfo per spec."""
+    """GET /info → SuccessResponse[ServerInfo] per the 1.0 release spec."""
     resp = await http_client.get("/v1/info")
-    body = resp.json()
+    envelope = resp.json()
+    assert envelope["success"] is True
+    body = envelope["result"]
     assert "specVersion" in body
     assert "capabilities" in body
     caps = body["capabilities"]
