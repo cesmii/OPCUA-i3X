@@ -228,6 +228,23 @@ class ModelBuilder(Protocol):
 class InstanceRegistry(SnapshotRegistry[str, NodeDescriptor]):
     """Keyed by i3X elementId (`<connection>!<NodeId>`)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        # parent key -> children, rebuilt lazily whenever `_ref` is swapped
+        # (every write is copy-on-write, so identity tracks freshness).
+        self._children_src: dict[str, NodeDescriptor] | None = None
+        self._children_idx: dict[str | None, list[NodeDescriptor]] = {}
+
+    def _children_index(self) -> dict[str | None, list[NodeDescriptor]]:
+        ref = self._ref
+        if self._children_src is not ref:
+            idx: dict[str | None, list[NodeDescriptor]] = {}
+            for n in ref.values():
+                idx.setdefault(n.parent_wire_node_id or n.parent_node_id, []).append(n)
+            self._children_idx = idx
+            self._children_src = ref
+        return self._children_idx
+
     async def reconcile(self, nodes: Iterable[NodeDescriptor]) -> Diff[str]:
         nodes_list = list(nodes)
         # Key by ``<conn>!<wire_node_id>`` so the registry agrees with what
@@ -245,8 +262,9 @@ class InstanceRegistry(SnapshotRegistry[str, NodeDescriptor]):
         parent_element_id: str | None,
         relationship: str | None = None,
     ) -> list[NodeDescriptor]:
-        """Direct children per `parent_node_id` link. O(n) — registries are small
-        enough that a pre-indexed map isn't worth the extra invalidation cost.
+        """Direct children per `parent_node_id` link. O(children) via a parent
+        index rebuilt once per registry swap; a linear scan per call made
+        GET /objects O(n^2) and hung the API on a 772K-instance Kepware.
 
         `relationship` filters by the OPC UA ref-type name stamped on each
         child's `parent_relationship` (`"HasComponent"`, `"HasProperty"`, ...).
@@ -265,8 +283,7 @@ class InstanceRegistry(SnapshotRegistry[str, NodeDescriptor]):
         # isn't populated (test fixtures, pre-browse-pipeline state).
         return [
             n
-            for n in self._ref.values()
-            if (n.parent_wire_node_id or n.parent_node_id) == parent_nid
-            and (parent_conn is None or n.connection == parent_conn)
+            for n in self._children_index().get(parent_nid, ())
+            if (parent_conn is None or n.connection == parent_conn)
             and (relationship is None or n.parent_relationship == relationship)
         ]
